@@ -1,0 +1,126 @@
+name: Artifactory DR Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dr-test:
+    name: Artifactory DR Sanity Check
+    runs-on: ubuntu-latest
+
+    env:
+      BASE_URL: https://artifactory.example.com
+      XRAY_URL: https://artifactory.example.com/xray
+      USER: ${{ secrets.ARTIFACTORY_USER }}
+      PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+      GENERIC_REPO: generic-dr-test
+      GENERIC_PATH: dr-test/test-artifact.txt
+      NODE_REMOTE_REPO: npm-remote
+      JAVA_REMOTE_REPO: maven-remote
+      PYTHON_REMOTE_REPO: pypi-remote
+      REPORT_FILE: dr_report.log
+
+    steps:
+      - name: 📄 Create Test File
+        run: |
+          echo "DR test content - $(date)" > test-artifact.txt
+          echo "==== DR Sanity Test Report ====" > $REPORT_FILE
+          echo "Start Time: $(date)" >> $REPORT_FILE
+
+      - name: ❤️ Artifactory Health Check
+        run: |
+          status=$(curl -s -u $USER:$PASSWORD -o /dev/null -w "%{http_code}" $BASE_URL/artifactory/api/system/ping)
+          echo "Artifactory Health: $status" >> $REPORT_FILE
+          if [ "$status" != "200" ]; then echo "Artifactory is NOT healthy!"; exit 1; fi
+
+      - name: ❤️ Xray Health Check
+        run: |
+          status=$(curl -s -u $USER:$PASSWORD -o /dev/null -w "%{http_code}" $XRAY_URL/api/v1/system/health)
+          echo "Xray Health: $status" >> $REPORT_FILE
+          if [ "$status" != "200" ]; then echo "Xray is NOT healthy!"; exit 1; fi
+
+      - name: 🔍 Create Generic Repo if Needed
+        run: |
+          status=$(curl -s -u $USER:$PASSWORD -o /dev/null -w "%{http_code}" $BASE_URL/artifactory/api/repositories/$GENERIC_REPO)
+          if [ "$status" -ne 200 ]; then
+            curl -s -u $USER:$PASSWORD -X PUT "$BASE_URL/artifactory/api/repositories/$GENERIC_REPO" \
+              -H "Content-Type: application/json" \
+              -d '{"rclass":"local","packageType":"generic","description":"DR Test Repository"}'
+            echo "Generic repo created" >> $REPORT_FILE
+          else
+            echo "Generic repo already exists" >> $REPORT_FILE
+          fi
+
+      - name: 📤 Upload Artifact
+        run: |
+          curl -s -u $USER:$PASSWORD -T test-artifact.txt "$BASE_URL/artifactory/$GENERIC_REPO/$GENERIC_PATH"
+          echo "Artifact uploaded" >> $REPORT_FILE
+
+      - name: 📂 List Artifacts
+        run: |
+          curl -s -u $USER:$PASSWORD "$BASE_URL/artifactory/api/storage/$GENERIC_REPO/dr-test/" | jq
+          echo "Artifact listing successful" >> $REPORT_FILE
+
+      - name: 📥 Download Artifact
+        run: |
+          curl -s -u $USER:$PASSWORD -o downloaded.txt "$BASE_URL/artifactory/$GENERIC_REPO/$GENERIC_PATH"
+          echo "Artifact download successful" >> $REPORT_FILE
+
+      - name: 🗑️ Delete Artifact
+        run: |
+          curl -s -u $USER:$PASSWORD -X DELETE "$BASE_URL/artifactory/$GENERIC_REPO/$GENERIC_PATH"
+          echo "Artifact deleted" >> $REPORT_FILE
+
+      - name: 🗑️ Delete Repository
+        run: |
+          curl -s -u $USER:$PASSWORD -X DELETE "$BASE_URL/artifactory/api/repositories/$GENERIC_REPO"
+          echo "Generic repo deleted" >> $REPORT_FILE
+
+      - name: 📦 NPM Install Check
+        run: |
+          mkdir -p npm-test && cd npm-test
+          echo '{}' > package.json
+          npm config set registry "$BASE_URL/artifactory/api/npm/$NODE_REMOTE_REPO"
+          npm install lodash
+          echo "NPM package install OK" >> ../$REPORT_FILE
+
+      - name: ☕ Maven Install Check
+        run: |
+          mkdir -p maven-test && cd maven-test
+          cat > pom.xml <<EOF
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                                       http://maven.apache.org/maven-v4_0_0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.test</groupId>
+            <artifactId>drtest</artifactId>
+            <version>1.0</version>
+            <dependencies>
+              <dependency>
+                <groupId>junit</groupId>
+                <artifactId>junit</artifactId>
+                <version>4.13.2</version>
+              </dependency>
+            </dependencies>
+            <repositories>
+              <repository>
+                <id>artifactory</id>
+                <url>$BASE_URL/artifactory/$JAVA_REMOTE_REPO</url>
+              </repository>
+            </repositories>
+          </project>
+EOF
+          mvn dependency:resolve -B
+          echo "Maven package install OK" >> ../$REPORT_FILE
+
+      - name: 🐍 Python pip Install Check
+        run: |
+          pip install --index-url "$BASE_URL/artifactory/api/pypi/$PYTHON_REMOTE_REPO/simple" requests
+          echo "pip package install OK" >> $REPORT_FILE
+
+      - name: 📊 Final Report
+        run: |
+          echo "End Time: $(date)" >> $REPORT_FILE
+          echo "=================================" >> $REPORT_FILE
+          cat $REPORT_FILE
